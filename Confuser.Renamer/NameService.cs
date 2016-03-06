@@ -46,9 +46,12 @@ namespace Confuser.Renamer {
 		readonly RandomGenerator random;
 		readonly VTableStorage storage;
 		AnalyzePhase analyze;
+
+		readonly HashSet<string> identifiers = new HashSet<string>();
 		readonly byte[] nameId = new byte[8];
 		readonly Dictionary<string, string> nameMap1 = new Dictionary<string, string>();
 		readonly Dictionary<string, string> nameMap2 = new Dictionary<string, string>();
+		internal ReversibleRenamer reversibleRenamer;
 
 		public NameService(ConfuserContext context) {
 			this.context = context;
@@ -127,17 +130,7 @@ namespace Confuser.Renamer {
 			}
 		}
 
-		public string ObfuscateName(string name, RenameMode mode) {
-			if (string.IsNullOrEmpty(name))
-				return string.Empty;
-
-			if (mode == RenameMode.Empty)
-				return "";
-			if (mode == RenameMode.Debug)
-				return "_" + name;
-
-			byte[] hash = Utils.Xor(Utils.SHA1(Encoding.UTF8.GetBytes(name)), nameSeed);
-
+		string ObfuscateNameInternal(byte[] hash, RenameMode mode) {
 			switch (mode) {
 				case RenameMode.Empty:
 					return "";
@@ -147,26 +140,52 @@ namespace Confuser.Renamer {
 					return Utils.EncodeString(hash, letterCharset);
 				case RenameMode.ASCII:
 					return Utils.EncodeString(hash, asciiCharset);
-				case RenameMode.Decodable: {
-						if (nameMap1.ContainsKey(name))
-							return nameMap1[name];
-						IncrementNameId();
-						var newName = "_" + Utils.EncodeString(hash, alphaNumCharset) + "_";
-						nameMap2[newName] = name;
-						nameMap1[name] = newName;
-						return newName;
-					}
-				case RenameMode.Sequential: {
-						if (nameMap1.ContainsKey(name))
-							return nameMap1[name];
-						IncrementNameId();
-						var newName = "_" + Utils.EncodeString(nameId, alphaNumCharset) + "_";
-						nameMap2[newName] = name;
-						nameMap1[name] = newName;
-						return newName;
-					}
+				case RenameMode.Decodable:
+					IncrementNameId();
+					return Utils.EncodeString(hash, alphaNumCharset);
+				case RenameMode.Sequential:
+					IncrementNameId();
+					return Utils.EncodeString(nameId, alphaNumCharset);
+				default:
+
+					throw new NotSupportedException("Rename mode '" + mode + "' is not supported.");
 			}
-			throw new NotSupportedException("Rename mode '" + mode + "' is not supported.");
+		}
+
+		public string ObfuscateName(string name, RenameMode mode) {
+			string newName = null;
+
+			if (string.IsNullOrEmpty(name))
+				return string.Empty;
+
+			if (mode == RenameMode.Empty)
+				return "";
+			if (mode == RenameMode.Debug)
+				return "_" + name;
+			if (mode == RenameMode.Reversible) {
+				if (reversibleRenamer == null)
+					throw new ArgumentException("Password not provided for reversible renaming.");
+				newName = reversibleRenamer.Encrypt(name);
+				return newName;
+			}
+
+			if (nameMap1.ContainsKey(name))
+				return nameMap1[name];
+
+			byte[] hash = Utils.Xor(Utils.SHA1(Encoding.UTF8.GetBytes(name)), nameSeed);
+			for (int i = 0; i < 100; i++) {
+				newName = ObfuscateNameInternal(hash, mode);
+				if (!identifiers.Contains(newName))
+					break;
+				hash = Utils.SHA1(hash);
+			}
+
+			if ((mode & RenameMode.Decodable) != 0) {
+				nameMap2[newName] = name;
+				nameMap1[name] = newName;
+			}
+
+			return newName;
 		}
 
 		public string RandomName() {
@@ -178,10 +197,12 @@ namespace Confuser.Renamer {
 		}
 
 		public void SetOriginalName(object obj, string name) {
+			identifiers.Add(name);
 			context.Annotations.Set(obj, OriginalNameKey, name);
 		}
 
 		public void SetOriginalNamespace(object obj, string ns) {
+			identifiers.Add(ns);
 			context.Annotations.Set(obj, OriginalNamespaceKey, ns);
 		}
 
